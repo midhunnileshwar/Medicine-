@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Stock Verification</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 10px; background: #f4f4f9; color: #333; }
+        .container { max-width: 800px; margin: auto; }
+        h2 { text-align: center; color: #0056b3; }
+        
+        /* Camera UI */
+        #camera-container { position: relative; width: 100%; border-radius: 8px; overflow: hidden; background: #000; margin-bottom: 10px; }
+        #camera { width: 100%; display: block; }
+        #capture-btn { width: 100%; padding: 15px; font-size: 18px; background: #28a745; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; margin-bottom: 20px;}
+        #capture-btn:active { background: #218838; }
+        #capture-btn:disabled { background: #6c757d; cursor: not-allowed; }
+        
+        /* Hidden canvas to grab the photo */
+        #snapshot { display: none; }
+        
+        .status-bar { padding: 12px; border-radius: 4px; font-weight: bold; text-align: center; background: #e2e3e5; margin-bottom: 20px; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .processing { background: #cce5ff; color: #004085; border: 1px solid #b8daff; }
+
+        table { width: 100%; border-collapse: collapse; background: white; font-size: 14px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        th, td { padding: 12px 8px; border-bottom: 1px solid #ddd; text-align: left; }
+        th { background-color: #0056b3; color: white; }
+        .status-verified { background-color: #d4edda; }
+        .status-over { background-color: #f8d7da; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Box Label Scanner (OCR)</h2>
+    
+    <div id="camera-container">
+        <video id="camera" autoplay playsinline></video>
+    </div>
+    <canvas id="snapshot"></canvas>
+    
+    <button id="capture-btn" onclick="captureAndRead()">📷 Capture & Read Text</button>
+    <div id="status-bar" class="status-bar">Starting camera...</div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Medicine Name</th>
+                <th>Batch</th>
+                <th>Target</th>
+                <th>Scanned</th>
+            </tr>
+        </thead>
+        <tbody id="inventory-body">
+            </tbody>
+    </table>
+</div>
+
+<script>
+    // 1. The Database Array (Sample extracted from your PDF)
+    const inventoryData = [
+        { id: 1, name: "Cyclosporine 50 mg Tab/Cap", batch: "G3A25017", targetQty: 300, scannedQty: 0 },
+        { id: 2, name: "Letrozole 2.5 mg tab (Fempro)", batch: "5GJ0404", targetQty: 200, scannedQty: 0 },
+        { id: 3, name: "Methotrexate 7.5 mg tab (Methotrax)", batch: "T-2511028", targetQty: 300, scannedQty: 0 },
+        { id: 4, name: "Mycophenolate 360mg Tab (Mofecon S 360)", batch: "MWIN25017", targetQty: 500, scannedQty: 0 },
+        { id: 5, name: "Mycophenolate Mofetil 500mg", batch: "06M25049", targetQty: 3000, scannedQty: 0 },
+        { id: 13, name: "Amoxycillin Cap/tab 250 mg (HAL)", batch: "1161", targetQty: 100, scannedQty: 0 },
+        { id: 18, name: "Cefpodoxime 200 mg", batch: "BFLJ25001", targetQty: 700, scannedQty: 0 },
+        { id: 70, name: "Human Insulin Biphasic", batch: "V25ITF5003", targetQty: 900, scannedQty: 0 },
+        { id: 362, name: "Tramadol 37.5mg and Paracetamol 325mg", batch: "T251002", targetQty: 280, scannedQty: 0 },
+        { id: 377, name: "Mometasone +Salicylic Acid Oint", batch: "11251393", targetQty: 10, scannedQty: 0 }
+    ];
+
+    const video = document.getElementById('camera');
+    const canvas = document.getElementById('snapshot');
+    const ctx = canvas.getContext('2d');
+    const statusBar = document.getElementById('status-bar');
+    const captureBtn = document.getElementById('capture-btn');
+
+    // 2. Render the Table
+    function renderTable() {
+        const tbody = document.getElementById('inventory-body');
+        tbody.innerHTML = '';
+        
+        inventoryData.forEach(item => {
+            let statusClass = '';
+            if (item.scannedQty === item.targetQty) statusClass = 'status-verified';
+            if (item.scannedQty > item.targetQty) statusClass = 'status-over';
+
+            tbody.innerHTML += `<tr class="${statusClass}">
+                <td>${item.name}</td>
+                <td>${item.batch}</td>
+                <td>${item.targetQty}</td>
+                <td><strong>${item.scannedQty}</strong></td>
+            </tr>`;
+        });
+    }
+
+    function setStatus(msg, type = '') {
+        statusBar.innerText = msg;
+        statusBar.className = `status-bar ${type}`;
+    }
+
+    // 3. Start the Camera
+    async function startCamera() {
+        try {
+            // Request the rear-facing camera
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "environment" } 
+            });
+            video.srcObject = stream;
+            setStatus("Ready. Point at text and capture.");
+        } catch (err) {
+            setStatus(`Camera Error: ${err.message}. Are you using HTTPS?`, 'error');
+            captureBtn.disabled = true;
+        }
+    }
+
+    // 4. Capture photo and run OCR
+    async function captureAndRead() {
+        captureBtn.disabled = true;
+        setStatus("Reading text... please wait.", "processing");
+
+        // Match canvas size to video frame
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        // Draw the current video frame onto the canvas
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Get the image data URL
+        const imageData = canvas.toDataURL('image/png');
+
+        try {
+            // Run Tesseract OCR on the image
+            const result = await Tesseract.recognize(imageData, 'eng');
+            const extractedText = result.data.text.toLowerCase();
+            
+            console.log("OCR Scanned Text:", extractedText); // For debugging
+            matchTextToDatabase(extractedText);
+
+        } catch (error) {
+            setStatus("Error reading text. Try again.", "error");
+        }
+        
+        captureBtn.disabled = false;
+    }
+
+    // 5. Check if the scanned text matches anything in our Database array
+    function matchTextToDatabase(scannedText) {
+        let matchFound = false;
+
+        for (let i = 0; i < inventoryData.length; i++) {
+            const item = inventoryData[i];
+            const batchLower = item.batch.toLowerCase();
+            
+            // Extract the first major word of the medicine name for fuzzy matching
+            // e.g., "Cyclosporine" from "Cyclosporine 50 mg Tab/Cap"
+            const firstWord = item.name.split(" ")[0].toLowerCase();
+
+            // If the OCR text contains the Batch Number OR the main medicine name
+            if (scannedText.includes(batchLower) || (firstWord.length > 3 && scannedText.includes(firstWord))) {
+                inventoryData[i].scannedQty += 1;
+                setStatus(`✔ Found: ${item.name}`, "success");
+                matchFound = true;
+                renderTable();
+                break; // Stop searching once we find a match
+            }
+        }
+
+        if (!matchFound) {
+            setStatus("✖ Text didn't match any known medicine or batch.", "error");
+        }
+    }
+
+    // Initialize
+    renderTable();
+    startCamera();
+
+</script>
+</body>
+</html>
